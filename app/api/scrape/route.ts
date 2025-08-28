@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { chromium } from "playwright";
+import { load } from "cheerio";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +27,46 @@ function buildVariantUrls(originalHref: string, newCampaign: string): string {
   }
 }
 
+async function scrapeHrefViaHttp(targetUrl: string): Promise<string | null> {
+  const res = await fetch(targetUrl, {
+    method: "GET",
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "accept-language": "en-US,en;q=0.9",
+    },
+    redirect: "follow",
+  });
+  if (!res.ok) return null;
+  const html = await res.text();
+  const $ = load(html);
+
+  const candidateSelectors = [
+    'a[href*="insurance.toyota.com.au/quote/quote-new"]',
+    'a.button-solid[href*="insurance.toyota.com.au/quote"]',
+    'a:contains("Get a Quote")',
+    'a.button-solid:contains("Get a Quote")',
+  ];
+
+  for (const selector of candidateSelectors) {
+    const el = $(selector).first();
+    if (el && el.length) {
+      const rawHref = el.attr("href");
+      if (rawHref) {
+        try {
+          const absolute = new URL(rawHref, targetUrl).toString();
+          return absolute;
+        } catch {
+          return rawHref;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as ScrapeRequestBody;
   const baseDomain = (body.baseDomain || "").trim().toLowerCase();
@@ -43,34 +83,8 @@ export async function POST(request: Request) {
 
   const targetUrl = buildDealerUrl(baseDomain);
 
-  let browser;
   try {
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-    });
-    const page = await context.newPage();
-
-    await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 30000 });
-
-    // Try to find the anchor by href first, then by class/text as fallback
-    const candidateSelectors = [
-      'a[href*="insurance.toyota.com.au/quote/quote-new"]',
-      'a.button-solid[href*="insurance.toyota.com.au/quote"]',
-      'a:has-text("Get a Quote")',
-      'a.button-solid:has-text("Get a Quote")',
-    ];
-
-    let href: string | null = null;
-    for (const selector of candidateSelectors) {
-      const locator = page.locator(selector).first();
-      const count = await locator.count();
-      if (count > 0) {
-        href = await locator.getAttribute("href");
-        if (href) break;
-      }
-    }
+    const href = await scrapeHrefViaHttp(targetUrl);
 
     if (!href) {
       return NextResponse.json(
@@ -97,9 +111,5 @@ export async function POST(request: Request) {
       { error: message, dealerPage: targetUrl },
       { status: 500 }
     );
-  } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
   }
 }
